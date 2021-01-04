@@ -1,5 +1,7 @@
 package co.ledger.wallet.daemon.models
 
+import java.net.URL
+
 import co.ledger.core
 import co.ledger.core.implicits._
 import co.ledger.core.{ConfigurationDefaults, ErrorCode}
@@ -21,12 +23,9 @@ import com.twitter.inject.Logging
 import com.typesafe.config.ConfigFactory
 import org.bitcoinj.core.Sha256Hash
 
-import java.net.URL
-import java.util.concurrent.TimeUnit
 import scala.collection.JavaConverters._
 import scala.collection._
 import scala.concurrent.Future
-import scala.concurrent.duration.FiniteDuration
 import scala.util.{Failure, Success, Try}
 
 class Pool(private val coreP: core.WalletPool, val id: Long) extends Logging {
@@ -282,8 +281,7 @@ object Pool extends Logging {
         port = port,
         password = Try(config.getString("redis.password")).toOption,
         db = Try(config.getInt("redis.db")).toOption,
-        name = Try(config.getString("redis.name")).getOrElse("RedisClient"),
-        connectionTimeout = Try(config.getInt("redis.connection_timeout")).map(FiniteDuration(_, TimeUnit.SECONDS)).toOption
+        connectionTimeout = Try(config.getInt("redis.connection_timeout")).toOption
       )
     }
 

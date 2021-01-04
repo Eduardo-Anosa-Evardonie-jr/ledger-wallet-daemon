@@ -27,7 +27,6 @@ object RedisPreferenceBackendTest extends Logging {
     port = config.getInt("redis.port"),
     password = maybePassword,
     db = maybeDb,
-    name = config.getString("redis.name"),
   )
 
   val preferenceBackend = new RedisPreferenceBackend(redisClientConfiguration)

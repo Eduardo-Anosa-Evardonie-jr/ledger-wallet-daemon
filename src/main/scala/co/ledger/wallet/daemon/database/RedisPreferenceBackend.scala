@@ -3,19 +3,14 @@ package co.ledger.wallet.daemon.database
 import java.nio.ByteBuffer
 import java.util
 
-import akka.actor.ActorSystem
-import akka.util.ByteString
 import co.ledger.core.{PreferencesBackend, PreferencesChange, PreferencesChangeType, RandomNumberGenerator}
 import com.google.common.cache.{CacheBuilder, CacheLoader, LoadingCache}
+import com.redis._
+import com.redis.serialization.Parse.Implicits.parseByteArray
 import com.twitter.inject.Logging
 import org.apache.commons.codec.binary.Hex
-import redis.{ByteStringFormatter, RedisClient}
 
-import scala.concurrent.Await
-import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.duration._
 import scala.jdk.CollectionConverters.collectionAsScalaIterableConverter
-import scala.util.Success
 
 case class RedisClientConfiguration(
                                      poolName: String,
@@ -23,8 +18,7 @@ case class RedisClientConfiguration(
                                      port: Int = 6379,
                                      password: Option[String] = None,
                                      db: Option[Int] = None,
-                                     name: String = "RedisClient",
-                                     connectionTimeout: Option[FiniteDuration] = None
+                                     connectionTimeout: Option[Int] = Some(10)
                                    ) {
   val prefix: String = "core:preferences:" ++ poolName ++ ":"
 }
@@ -39,21 +33,14 @@ class RedisPreferenceBackend(conf: RedisClientConfiguration) extends Preferences
         loadPrefEntry(key.array()).map[ValuePref](ByteBuffer.wrap)
       }
     })
-  private implicit val akkaSystem: ActorSystem = akka.actor.ActorSystem()
 
-  private implicit val byteArrayToByteString: ByteStringFormatter[Array[Byte]] =
-    new ByteStringFormatter[Array[Byte]] {
-      override def serialize(data: Array[Byte]): ByteString = {
-        ByteString(data)
-      }
-
-      override def deserialize(bs: ByteString): Array[Byte] = {
-        bs.toArray
-      }
-    }
-
-  private val redis: RedisClient = RedisClient(
-    conf.host, conf.port, conf.password, conf.db, conf.name, conf.connectionTimeout
+  private val redis: RedisClient = new RedisClient(
+    host = conf.host,
+    port = conf.port,
+    secret = conf.password,
+    database = conf.db.getOrElse(0),
+    timeout = conf.connectionTimeout.getOrElse(0),
+    sslContext = None
   )
 
   def init(): Unit = {
@@ -74,39 +61,32 @@ class RedisPreferenceBackend(conf: RedisClientConfiguration) extends Preferences
   }
 
   private def loadPrefEntry(key: Array[Byte]): Option[Array[Byte]] = {
-    val f = redis.get(prepareKey(key))
-    Await.result(f, 10.seconds)
+    redis.get(prepareKey(key))
   }
 
   override def commit(arrayList: util.ArrayList[PreferencesChange]): Boolean = {
     if (!arrayList.isEmpty) {
-      val redisTransaction = redis.multi()
+      arrayList.asScala.map(pref => prepareKey(pref.getKey))
+        .foreach(redis.watch(_))
+      redis.pipeline { p =>
+        arrayList.asScala
+          .filter(_.getType == PreferencesChangeType.PUT_TYPE)
+          .foreach(preference => {
+            val key = prepareKey(preference.getKey)
 
-      arrayList.asScala
-        .filter(_.getType == PreferencesChangeType.PUT_TYPE)
-        .foreach(preference => {
-          val key = prepareKey(preference.getKey)
+            p.set(key, preference.getValue)
+          })
+        arrayList.asScala
+          .filter(_.getType == PreferencesChangeType.DELETE_TYPE)
+          .foreach(preference => {
+            val key = prepareKey(preference.getKey)
 
-          redisTransaction.watch(key)
-          redisTransaction.set(key, preference.getValue)
-        })
-      arrayList.asScala
-        .filter(_.getType == PreferencesChangeType.DELETE_TYPE)
-        .foreach(preference => {
-          val key = prepareKey(preference.getKey)
+            p.del(key)
+          })
+      }
 
-          redisTransaction.watch(key)
-          redisTransaction.del(key)
-        })
-
-      val invalidation = redisTransaction.exec().andThen {
-        case Success(_) => arrayList.forEach(p => prefCache.invalidate(ByteBuffer.wrap(p.getKey)))
-      }.map(_ => true)
-        .recover {
-          case e => logger.error("failed to commit preference changes", e)
-            false
-        }
-      Await.result(invalidation, 10.seconds)
+      arrayList.forEach(p => prefCache.invalidate(ByteBuffer.wrap(p.getKey)))
+      true
     } else true
   }
 
@@ -120,14 +100,13 @@ class RedisPreferenceBackend(conf: RedisClientConfiguration) extends Preferences
 
   override def clear(): Unit = {
     val batchSize = 1000
-    var cleared = false
+    var cursor: Option[Int] = None
     do {
-      val f = redis.scan(matchGlob = Some(conf.prefix ++ "*"), count = Some(batchSize))
-      val cursor = Await.result(f, 10.seconds)
-      val redisTransaction = redis.multi()
-      cursor.data.foreach(redisTransaction.del(_))
-      Await.result(redisTransaction.exec(), 10.seconds)
-      cleared = cursor.data.length < batchSize
-    } while (!cleared)
+      val Some((maybeCursor, maybeData)) = redis.scan(cursor.getOrElse(0), conf.prefix ++ "*", count = batchSize)
+      maybeData.foreach(maybeKeys => {
+        redis.del(maybeKeys.flatten)
+      })
+      cursor = maybeCursor
+    } while (cursor.isDefined)
   }
 }
