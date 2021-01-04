@@ -26,7 +26,7 @@ case class RedisClientConfiguration(
                                      name: String = "RedisClient",
                                      connectionTimeout: Option[FiniteDuration] = None
                                    ) {
-  val prefix: String = "core|preferences|" ++ poolName ++ "|"
+  val prefix: String = "core:preferences:" ++ poolName ++ ":"
 }
 
 class RedisPreferenceBackend(conf: RedisClientConfiguration) extends PreferencesBackend with Logging {
